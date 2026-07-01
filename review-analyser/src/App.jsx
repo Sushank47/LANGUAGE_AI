@@ -15,9 +15,9 @@ const TEMPLATES = [
   }
 ];
 
-// Read Azure credentials dynamically from environment variables
-const AZURE_KEY = import.meta.env.VITE_AZURE_KEY || "";
-const AZURE_ENDPOINT = (import.meta.env.VITE_AZURE_ENDPOINT || "").replace(/\/$/, "");
+// Read Azure credentials dynamically from environment variables (supports multiple naming conventions)
+const AZURE_KEY = import.meta.env.VITE_AZURE_KEY || import.meta.env.VITE_AZURE_COGNITIVE_API_KEY || "";
+const AZURE_ENDPOINT = (import.meta.env.VITE_AZURE_ENDPOINT || import.meta.env.VITE_AZURE_COGNITIVE_ENDPOINT || "").replace(/\/$/, "");
 
 export default function App() {
   const [reviewText, setReviewText] = useState("");
