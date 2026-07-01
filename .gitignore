@@ -1,0 +1,18 @@
+# Secrets and configurations
+review-analyser/api/local.settings.json
+
+# Python artifacts
+review-analyser/api/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# Node.js / React build artifacts
+review-analyser/node_modules/
+review-analyser/dist/
+.eslintcache
+
+# OS metadata
+.DS_Store
+Thumbs.db

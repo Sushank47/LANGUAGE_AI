@@ -1,0 +1,23 @@
+# Secrets and configurations
+local.settings.json
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Node.js / React build artifacts
+node_modules/
+dist/
+.eslintcache
+
