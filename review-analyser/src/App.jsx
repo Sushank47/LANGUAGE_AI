@@ -15,6 +15,10 @@ const TEMPLATES = [
   }
 ];
 
+// Read Azure credentials dynamically from environment variables
+const AZURE_KEY = import.meta.env.VITE_AZURE_KEY || "";
+const AZURE_ENDPOINT = (import.meta.env.VITE_AZURE_ENDPOINT || "").replace(/\/$/, "");
+
 export default function App() {
   const [reviewText, setReviewText] = useState("");
   const [loading, setLoading] = useState(false);
@@ -22,13 +26,15 @@ export default function App() {
   const [results, setResults] = useState(null);
   const [apiOnline, setApiOnline] = useState(true);
 
-  // Check API health on mount
+  // Check endpoint connectivity on mount
   useEffect(() => {
     async function checkApiHealth() {
       try {
-        const response = await fetch("http://localhost:7071/api/analyze", { method: 'GET' });
-        // The server returns 405 Method Not Allowed for GET, which indicates the server is active!
-        if (response.status === 405 || response.status === 200) {
+        // Send a simple request or pre-flight to verify endpoint is online
+        const response = await fetch(`${AZURE_ENDPOINT}/language/:analyze-text?api-version=2022-05-01`, {
+          method: 'OPTIONS'
+        });
+        if (response.ok || response.status === 200 || response.status === 204) {
           setApiOnline(true);
         } else {
           setApiOnline(false);
@@ -38,11 +44,53 @@ export default function App() {
       }
     }
     checkApiHealth();
-    
-    // Periodically poll API health every 10 seconds
-    const interval = setInterval(checkApiHealth, 10000);
-    return () => clearInterval(interval);
   }, []);
+
+  // Helper function to query Azure Cognitive Service directly
+  const queryAzureService = async (kind, text, enableOpinionMining = false) => {
+    const url = `${AZURE_ENDPOINT}/language/:analyze-text?api-version=2022-05-01`;
+    const payload = {
+      kind: kind,
+      analysisInput: {
+        documents: [
+          {
+            id: "1",
+            language: "en",
+            text: text
+          }
+        ]
+      },
+      parameters: {
+        modelVersion: "latest"
+      }
+    };
+
+    if (enableOpinionMining) {
+      payload.parameters.opinionMining = true;
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Ocp-Apim-Subscription-Key': AZURE_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      let message = `API error status: ${response.status}`;
+      try {
+        const errorJson = await response.json();
+        if (errorJson?.error?.message) {
+          message = errorJson.error.message;
+        }
+      } catch (e) {}
+      throw new Error(message);
+    }
+
+    return response.json();
+  };
 
   const handleAnalyze = async (e) => {
     e.preventDefault();
@@ -53,37 +101,106 @@ export default function App() {
     setResults(null);
 
     try {
-      const response = await fetch("http://localhost:7071/api/analyze", {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ text: reviewText })
-      });
+      // Query all three cognitive analysis tasks in parallel from the browser
+      const [sentimentRes, phrasesRes, entitiesRes] = await Promise.allSettled([
+        queryAzureService("SentimentAnalysis", reviewText, true),
+        queryAzureService("KeyPhraseExtraction", reviewText),
+        queryAzureService("EntityRecognition", reviewText)
+      ]);
 
-      if (!response.ok && response.status !== 207) {
-        let errorText = `Server returned error status: ${response.status}`;
-        try {
-          const errJson = await response.json();
-          if (errJson && errJson.error) {
-            errorText = errJson.error;
-          }
-        } catch (e) {}
-        throw new Error(errorText);
+      const data = {
+        sentiment: null,
+        keyPhrases: [],
+        entities: [],
+        opinions: [],
+        errors: null
+      };
+
+      let hasWarning = false;
+      const errorsObj = {};
+
+      // 1. Parse Sentiment & Opinions
+      if (sentimentRes.status === "fulfilled") {
+        const sentimentDoc = sentimentRes.value.results?.documents?.[0];
+        if (sentimentDoc) {
+          data.sentiment = {
+            label: sentimentDoc.sentiment,
+            confidenceScores: sentimentDoc.confidenceScores
+          };
+
+          // Parse sentence opinions (aspect-based sentiment)
+          const opinionsList = [];
+          sentimentDoc.sentences?.forEach(sentence => {
+            if (sentence.targets) {
+              sentence.targets.forEach(target => {
+                const assessments = [];
+                if (target.relations) {
+                  target.relations.forEach(relation => {
+                    if (relation.relationType === 'assessment') {
+                      const refParts = relation.ref.split('/');
+                      const assessIdx = parseInt(refParts[refParts.length - 1], 10);
+                      if (sentence.assessments && sentence.assessments[assessIdx]) {
+                        assessments.push(sentence.assessments[assessIdx].text);
+                      }
+                    }
+                  });
+                }
+                opinionsList.push({
+                  target: target.text,
+                  sentiment: target.sentiment,
+                  assessments: assessments
+                });
+              });
+            }
+          });
+          data.opinions = opinionsList;
+        }
+      } else {
+        hasWarning = true;
+        errorsObj.sentiment = { error: sentimentRes.reason.message };
       }
 
-      const data = await response.json();
+      // 2. Parse Key Phrases
+      if (phrasesRes.status === "fulfilled") {
+        const phrasesDoc = phrasesRes.value.results?.documents?.[0];
+        if (phrasesDoc) {
+          data.keyPhrases = phrasesDoc.keyPhrases || [];
+        }
+      } else {
+        hasWarning = true;
+        errorsObj.keyPhrases = { error: phrasesRes.reason.message };
+      }
 
-      // Check if there are critical errors returning null results
-      if (!data.sentiment && !data.keyPhrases?.length && !data.entities?.length) {
-        throw new Error("All analysis attempts failed.");
+      // 3. Parse Named Entities
+      if (entitiesRes.status === "fulfilled") {
+        const entitiesDoc = entitiesRes.value.results?.documents?.[0];
+        if (entitiesDoc) {
+          data.entities = (entitiesDoc.entities || []).map(entity => ({
+            text: entity.text,
+            category: entity.category,
+            subcategory: entity.subcategory,
+            confidenceScore: entity.confidenceScore
+          }));
+        }
+      } else {
+        hasWarning = true;
+        errorsObj.entities = { error: entitiesRes.reason.message };
+      }
+
+      // Trigger error if all calls failed
+      if (!data.sentiment && data.keyPhrases.length === 0 && data.entities.length === 0) {
+        throw new Error("All analysis attempts failed. Check credentials and endpoint URL.");
+      }
+
+      if (hasWarning) {
+        data.errors = errorsObj;
       }
 
       setResults(data);
-      setApiOnline(true); // Successfully made contact
+      setApiOnline(true);
     } catch (err) {
-      console.error("Analysis call failed:", err);
-      setError(err.message || "Unable to connect to the backend server. Ensure the local Python Function is running on port 7071.");
+      console.error("Direct Azure API call failed:", err);
+      setError(err.message || "Unable to connect to Azure Cognitive Services. Check network settings and credentials.");
       setApiOnline(false);
     } finally {
       setLoading(false);
@@ -99,7 +216,6 @@ export default function App() {
     }
   };
 
-  // Helper to safely fetch confidence scores
   const getConfidenceScores = () => {
     if (!results || !results.sentiment) return { positive: 0, neutral: 0, negative: 0 };
     return results.sentiment.confidenceScores || { positive: 0, neutral: 0, negative: 0 };
